@@ -46,7 +46,6 @@ class TraceEntryEA:
     speculated_tokens_per_step: list = field(default_factory=list)
     accepted_tokens_per_step: list = field(default_factory=list)
     generated_tokens_per_step: list = field(default_factory=list)
-    speculation_times_per_step: list = field(default_factory=list)
 
 def save_ea_trace(trace: Trace, output_path: str):
     # Convert the Trace instance to a dictionary
@@ -112,7 +111,7 @@ def run_eval(
         torch.cuda.synchronize()
         start_time = time.time()
 
-        output_ids, new_tokens, num_decoding_steps, _, _, _, _ = model.eagenerate(
+        output_ids, new_tokens, num_decoding_steps, _, _, _ = model.eagenerate(
             torch.as_tensor(input_ids).cuda(),
             temperature=0.0,
             log=True,
@@ -181,7 +180,7 @@ def run_eval(
             # try:
             torch.cuda.synchronize()
             start_time = time.time()
-            output_ids, num_new_tokens, decoding_steps, speculated_tokens_per_step, accepted_tokens_per_step, generated_tokens_per_step, speculation_times_per_step = model.eagenerate(
+            output_ids, num_new_tokens, decoding_steps, speculated_tokens_per_step, accepted_tokens_per_step, generated_tokens_per_step = model.eagenerate(
                 torch.as_tensor(input_ids).cuda(),
                 temperature=0.0,
                 log=True,
@@ -193,19 +192,12 @@ def run_eval(
             output_ids = output_ids[0][len(input_ids[0]):]
             output = tokenizer.decode(output_ids)
 
-            # if decoding_steps == 0:
-            #     print("Warning: No decoding steps taken.")
-            #     print(f"input_ids: {input_ids}")
-            #     print(f"output_ids: {output_ids}")
-            #     print(speculated_tokens_per_step, accepted_tokens_per_step, generated_tokens_per_step)
-            #     print("entry", entry)
-
-            # print(f"Speedup: {len(output_ids) / decoding_steps:.2f}x")
+            print(f"Speedup: {len(output_ids) / decoding_steps:.2f}x")
             # print average speculation length, acceptance rate, and generation rate
             avg_accepted_tokens = sum(accepted_tokens_per_step) / len(accepted_tokens_per_step)
             avg_generated_tokens = sum(generated_tokens_per_step) / len(generated_tokens_per_step)
             avg_speculated_tokens = sum(speculated_tokens_per_step) / len(speculated_tokens_per_step)
-            # print(f"Accepted tokens/speculated: {avg_accepted_tokens}/{avg_speculated_tokens}. Acceptance rate: {avg_accepted_tokens/avg_speculated_tokens:.2f}")
+            print(f"Accepted tokens/speculated: {avg_accepted_tokens}/{avg_speculated_tokens}. Acceptance rate: {avg_accepted_tokens/avg_speculated_tokens:.2f}")
 
             new_entries.append(TraceEntryEA(
                 prompt=entry.prompt,
@@ -219,7 +211,6 @@ def run_eval(
                 speculated_tokens_per_step=speculated_tokens_per_step,
                 accepted_tokens_per_step=accepted_tokens_per_step,
                 generated_tokens_per_step=generated_tokens_per_step,
-                speculation_times_per_step=speculation_times_per_step,
             ))
 
         partition.eval_entries = new_entries
