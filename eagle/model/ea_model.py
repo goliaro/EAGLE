@@ -19,7 +19,7 @@ from .kv_cache import initialize_past_key_values
 from .cnets import Model
 from .configs import EConfig
 
-
+# from suffix_decoding_simulator_v2 import *
 
 
 
@@ -68,6 +68,7 @@ class EaModel(nn.Module):
         self.ea_layer.load_state_dict(ea_layer_state_dict, strict=True)
         self.ea_layer.to(self.base_model.dtype).to(device)
         self.ea_layer.init_tree()
+        self.dumped_tree_mask=False
 
     def get_tokenizer(self):
         """Get the tokenizer of the base model.
@@ -160,6 +161,8 @@ class EaModel(nn.Module):
 
         return model
 
+    # Calls forward on the base model
+    # returns output of the model (except lm head) and hidden states (i.e. outputs[0]). If output_orig=true, also output the output of the lm head
     def forward(
             self,
             input_ids=None,
@@ -171,6 +174,7 @@ class EaModel(nn.Module):
 
         with torch.inference_mode():
             # Pass input through the base model
+            # Calling self.base_model.model() instead of self.base_model() to be able not to run the lm head
             outputs = self.base_model.model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -185,6 +189,120 @@ class EaModel(nn.Module):
             return outputs, orig, hidden_states
         else:
             return outputs, hidden_states
+
+
+    def populate_best_suffix_tree_candidates(self, prompt_tree, input_ids):
+        max_prefix_length = min(len(input_ids), self.max_depth)
+        candidate = ([], [])
+        prefix_length = 0
+        best_score = 0
+        for length in range(1, max_prefix_length + 1):
+            token_ids, parents, score = prompt_tree.find_best_path_or_tree(
+                input_ids[len(input_ids) - length :],
+                self.matching_strategy,
+                self.max_spec_factor,
+            )
+            if score > best_score:
+                candidate = (token_ids, parents)
+                prefix_length = length
+                best_score = score
+        for length in range(1, max_prefix_length + 1):
+            token_ids, parents, score = self.suffix_tree.find_best_path_or_tree(
+                input_ids[len(input_ids) - length :],
+                self.matching_strategy,
+                self.max_spec_factor,
+            )
+            if score > best_score:
+                candidate = (token_ids, parents)
+                prefix_length = length
+                best_score = score
+        return candidate, prefix_length
+    
+    def generate_suffix_decoding_mask_and_positions(self, candidate):
+        token_ids, parents = candidate
+        tree_mask = torch.zeros((self.max_sd_tree_size +1, self.max_sd_tree_size +1)) # +1 for the root
+        tree_position_ids = torch.zeros(self.max_sd_tree_size, dtype=torch.long)
+        for i, parent in enumerate(parents):
+            assert parent < i
+            idx_to_copy_from = 0 if i == 0 else parent + 1
+            assert idx_to_copy_from < i+1
+            # Set causal relationship to all tokens with causal relationship to the parent
+            tree_mask[i+1, :] = tree_mask[idx_to_copy_from, :]
+            # Set causal relationship to self
+            tree_mask[i+1, i+1] = 1
+            # set position ids: position of current token = position of the parent + 1
+            tree_position_ids[i] = tree_position_ids[parent] + 1
+        return tree_mask, tree_position_ids
+    
+    def verify_and_commit(self, outputs):
+        pass
+
+    @torch.no_grad()
+    def suffix_dec_generate(self,
+                            input_ids,
+                            temperature=0.0,
+                            top_p=0.0,
+                            top_k=0.0,
+                            max_new_tokens=512,
+                            max_length=2048,
+                            log=False,
+                            is_llama3=False):
+        if is_llama3:
+            stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
+        assert temperature == 0.0, "Suffix decoding does not support temperature"
+        assert top_p == 0.0, "Suffix decoding does not support top_p"
+        assert top_k == 0.0, "Suffix decoding does not support top_k"
+        input_ids = input_ids.clone()
+        # Initialize prompt tree
+        prompt_tree = SuffixTree([input_ids], max_depth=self.max_depth)
+        # Initialize the KV cache
+        self.ea_layer.reset_kv()
+        if hasattr(self, "past_key_values"):
+            past_key_values = self.past_key_values
+            past_key_values_data = self.past_key_values_data
+            current_length_data = self.current_length_data
+            # Reset the past key and value states
+            current_length_data.zero_()
+        else:
+            (
+                past_key_values,
+                past_key_values_data,
+                current_length_data,
+            ) = initialize_past_key_values(self.base_model)
+            self.past_key_values = past_key_values
+            self.past_key_values_data = past_key_values_data
+            self.current_length_data = current_length_data
+        input_len = input_ids.shape[1]
+        reset_tree_mode(self)
+        # prefilling
+        outputs = self.base_model(input_ids, past_key_values=past_key_values, use_cache=True)
+        
+        new_tokens = 0
+        for new_token_idx in range(max_length):
+            # generate predictions
+            candidate, prefix_length = self.populate_best_suffix_tree_candidates(prompt_tree, input_ids)
+            # Build tree mask, position ids
+            tree_mask, tree_position_ids = self.generate_suffix_decoding_mask_and_positions(candidate)
+            self.base_model.model.tree_mask = tree_mask
+            position_ids = tree_position_ids + input_ids.shape[1]
+            # Verification LLM
+            outputs = self.base_model(input_ids, past_key_values=past_key_values, position_ids=position_ids, use_cache=False)
+            # Figure out which tokens were accepted
+            accepted_tokens, input_ids = self.verify_and_commit(outputs, input_ids)
+            # Update KV cache to store committed tokens (accepted tokens + bonus)
+            self.update_kv_cache(accepted_tokens, input_ids)
+            print("new input_ids: ", input_ids)
+
+            if is_llama3:
+                if stop_token_id in input_ids[0, input_len:].tolist():
+                    break
+
+            if self.tokenizer.eos_token_id in input_ids[0, input_len:].tolist():
+                break
+            if new_tokens > max_new_tokens:
+                break
+            if input_ids.shape[1] > max_length:
+                break
 
     @torch.no_grad()
     def eagenerate(
@@ -201,7 +319,9 @@ class EaModel(nn.Module):
     ):
         if is_llama3:
             stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
+        print(f"Calling eagenerate with params: temperature={temperature}, top_p={top_p}, top_k={top_k}, max_new_tokens={max_new_tokens}, max_length={max_length}, log={log}, is_llama3={is_llama3}")
         max_length=max_length-self.ea_layer.total_tokens-10
+        print(f"self.ea_layer.total_tokens={self.ea_layer.total_tokens}, max_length={max_length}")
 
         if temperature > 1e-5:
             logits_processor = prepare_logits_processor(temperature=temperature, top_p=top_p, top_k=top_k)
@@ -214,7 +334,7 @@ class EaModel(nn.Module):
         input_ids = input_ids.clone()
         self.ea_layer.reset_kv()
 
-
+        print("padding: ", padding)
 
         # Initialize the past key and value states
         if hasattr(self, "past_key_values"):
@@ -235,12 +355,30 @@ class EaModel(nn.Module):
 
         input_len = input_ids.shape[1]
         reset_tree_mode(self)
+        print("input_len: ", input_len)
+        # print("past_key_values: ", past_key_values)
+        print("Calling initalize tree...")
         draft_tokens, retrieve_indices,tree_mask,tree_position_ids, logits, hidden_state, sample_token = initialize_tree(
             input_ids, self, past_key_values, logits_processor
         )
+        # Dump tree mask to file
+        if not self.dumped_tree_mask:
+            torch.save(tree_mask, "tree_mask.pt")
+            self.dumped_tree_mask = True
+
+
+        print("draft_tokens: ", draft_tokens)
+        print("retrieve_indices: ", retrieve_indices)
+        print("tree_mask: ", tree_mask)
+        print("tree_position_ids: ", tree_position_ids)
+        print("logits: ", logits)
+
         new_token = 0
 
+        # Setting max_length to 2 for testing
+        max_length = 2
         for idx in range(max_length):
+            print("\tEntering loop with idx: ", idx)
             #with Timer("all"):
             self.base_model.model.tree_mask = tree_mask
 
@@ -258,11 +396,14 @@ class EaModel(nn.Module):
             #logits = logits[0, retrieve_indices]
             draft_tokens=torch.cat((draft_tokens,padding),dim=1)
             candidates=draft_tokens[0,retrieve_indices]
+            print("candidates (draft tokens after rearranging by branch): ", candidates)
             best_candidate, accept_length, sample_p = evaluate_posterior(
                 logits, candidates, logits_processor
             )
-            # print(accept_length)
+            print("Accept lenght:", accept_length)
+            print("Best candidate: ", best_candidate)
             #with Timer("update_inference_inputs"):
+            print("calling update_inference_inputs...")
             input_ids, draft_tokens, retrieve_indices,tree_mask,tree_position_ids, new_token, hidden_state, sample_token = update_inference_inputs(
                 input_ids,
                 candidates,
@@ -277,6 +418,7 @@ class EaModel(nn.Module):
                 hidden_state_new,
                 sample_p
             )
+            print("new input_ids: ", input_ids)
 
             if is_llama3:
                 if stop_token_id in input_ids[0, input_len:].tolist():
@@ -343,6 +485,7 @@ class EaModel(nn.Module):
 
         input_len = input_ids.shape[1]
         reset_tree_mode(self)
+        # prefilling
         outputs = self.base_model(input_ids, past_key_values=past_key_values, use_cache=True)
         new_token = 0
 
@@ -353,8 +496,10 @@ class EaModel(nn.Module):
                 probabilities = torch.nn.functional.softmax(logits, dim=-1)
                 input_id = torch.multinomial(probabilities, 1)
             else:
+                # extract last token for incremental decoding
                 input_id = outputs.logits[:, -1:].argmax(dim=-1)
             outputs = self.base_model(input_id, use_cache=True, past_key_values=past_key_values)
+            # append last token
             input_ids = torch.cat([input_ids, input_id], dim=-1)
             new_token+=1
 
@@ -373,6 +518,7 @@ class EaModel(nn.Module):
         else:
             return input_ids, new_token, idx
 
+    # for webui
     @torch.no_grad()
     def ea_generate(
             self,
@@ -478,7 +624,7 @@ class EaModel(nn.Module):
             if input_ids.shape[1] > max_length:
                 break
 
-
+    # for webui
     @torch.no_grad()
     def naive_generate(
             self,

@@ -230,6 +230,7 @@ def initialize_tree0(input_ids, model, past_key_values, logits_processor):
     return draft_tokens, retrieve_indices,tree_mask,tree_position_ids, logits, hidden_state, sample_token
 
 def initialize_tree(input_ids, model, past_key_values, logits_processor):
+    # prefilling
     outputs, orig, hidden_states = model(
         input_ids, past_key_values=past_key_values, output_orig=True
     )
@@ -240,9 +241,10 @@ def initialize_tree(input_ids, model, past_key_values, logits_processor):
         probabilities = torch.nn.functional.softmax(logits, dim=1)
         token = torch.multinomial(probabilities, 1)
     else:
+        # orig is the lm head output
         token = torch.argmax(orig[:, -1])
         token = token[None, None]
-    input_ids = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
+    input_ids = torch.cat((input_ids, token.to(input_ids.device)), dim=1) # append new token
     # Clone the output hidden states
 
     draft_tokens, retrieve_indices,tree_mask,tree_position_ids = model.ea_layer.topK_genrate(hidden_states, input_ids, model.base_model.lm_head,logits_processor)
@@ -307,7 +309,7 @@ def tree_decoding(
         retrieve_indices,
 ):
     position_ids = tree_position_ids + input_ids.shape[1]
-
+    print("tree_decoding running model on tree candidates: ", tree_candidates)
     outputs, tree_logits, hidden_state = model(
         tree_candidates,
         output_orig=True,
@@ -317,6 +319,7 @@ def tree_decoding(
 
 
     logits = tree_logits[0, retrieve_indices]
+    print("tree_decoding logits: ", logits.shape, logits)
     return logits, hidden_state, outputs
 
 

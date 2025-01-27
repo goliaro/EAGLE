@@ -50,6 +50,7 @@ def run_eval(
     # Split the question file into `num_gpus` files
     assert num_gpus_total % num_gpus_per_model == 0
     use_ray = num_gpus_total // num_gpus_per_model > 1
+    print("Use Ray?", use_ray)
 
     if use_ray:
         get_answers_func = ray.remote(num_gpus=num_gpus_per_model)(
@@ -111,10 +112,10 @@ def get_model_answers(
 
     tokenizer = model.get_tokenizer()
 
-    if temperature > 1e-5:
-        logits_processor = prepare_logits_processor(temperature=temperature)
-    else:
-        logits_processor = None
+    # if temperature > 1e-5:
+    #     logits_processor = prepare_logits_processor(temperature=temperature)
+    # else:
+    #     logits_processor = None
 
     model.eval()
     print('Check model training state:', model.training)
@@ -124,88 +125,88 @@ def get_model_answers(
 
     question = questions[0]
 
-    # warmup
-    for _ in range(3):
-        torch.manual_seed(0)
+    # # warmup
+    # for _ in range(3):
+    #     torch.manual_seed(0)
 
-        messages = [
-            {"role": "system",
-             "content": "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."},
-        ]
-        turns = []
-        idxs = []
-        new_tokens = []
-        wall_time = []
-        for j in range(len(question["turns"])):
-            qs = question["turns"][j]
-            messages.append({
-                "role": "user",
-                "content": qs
-            })
-            prompt = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-            input_ids = tokenizer([prompt],add_special_tokens=False,).input_ids
+    #     messages = [
+    #         {"role": "system",
+    #          "content": "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."},
+    #     ]
+    #     turns = []
+    #     idxs = []
+    #     new_tokens = []
+    #     wall_time = []
+    #     for j in range(len(question["turns"])):
+    #         qs = question["turns"][j]
+    #         messages.append({
+    #             "role": "user",
+    #             "content": qs
+    #         })
+    #         prompt = tokenizer.apply_chat_template(
+    #             messages,
+    #             tokenize=False,
+    #             add_generation_prompt=True,
+    #         )
+    #         input_ids = tokenizer([prompt],add_special_tokens=False,).input_ids
 
-            # try:
-            torch.cuda.synchronize()
-            start_time = time.time()
+    #         # try:
+    #         torch.cuda.synchronize()
+    #         start_time = time.time()
 
-            output_ids, new_token, idx = model.eagenerate(
-                torch.as_tensor(input_ids).cuda(),
-                temperature=temperature,
-                log=True,
-                is_llama3=True,
-            )
-            torch.cuda.synchronize()
-            total_time = time.time() - start_time
-            output_ids = output_ids[0][len(input_ids[0]):]
-            # be consistent with the template's stop_token_ids
-            stop_token_ids = [
-                tokenizer.eos_token_id,
-                tokenizer.convert_tokens_to_ids("<|eot_id|>")
-            ]
+    #         output_ids, new_token, idx = model.eagenerate(
+    #             torch.as_tensor(input_ids).cuda(),
+    #             temperature=temperature,
+    #             log=True,
+    #             is_llama3=True,
+    #         )
+    #         torch.cuda.synchronize()
+    #         total_time = time.time() - start_time
+    #         output_ids = output_ids[0][len(input_ids[0]):]
+    #         # be consistent with the template's stop_token_ids
+    #         stop_token_ids = [
+    #             tokenizer.eos_token_id,
+    #             tokenizer.convert_tokens_to_ids("<|eot_id|>")
+    #         ]
 
-            if stop_token_ids:
-                stop_token_ids_index = [
-                    i
-                    for i, id in enumerate(output_ids)
-                    if id in stop_token_ids
-                ]
-                if len(stop_token_ids_index) > 0:
-                    output_ids = output_ids[: stop_token_ids_index[0]]
+    #         if stop_token_ids:
+    #             stop_token_ids_index = [
+    #                 i
+    #                 for i, id in enumerate(output_ids)
+    #                 if id in stop_token_ids
+    #             ]
+    #             if len(stop_token_ids_index) > 0:
+    #                 output_ids = output_ids[: stop_token_ids_index[0]]
 
-            output = tokenizer.decode(
-                output_ids,
-                spaces_between_special_tokens=False,
-            )
-            # stop_str = "</s>"
-            # if stop_str and output.find(stop_str) > 0:
-            #     output = output[: output.find(stop_str)]
-            for special_token in tokenizer.special_tokens_map.values():
-                if isinstance(special_token, list):
-                    for special_tok in special_token:
-                        output = output.replace(special_tok, "")
-                else:
-                    output = output.replace(special_token, "")
-            output = output.strip()
+    #         output = tokenizer.decode(
+    #             output_ids,
+    #             spaces_between_special_tokens=False,
+    #         )
+    #         # stop_str = "</s>"
+    #         # if stop_str and output.find(stop_str) > 0:
+    #         #     output = output[: output.find(stop_str)]
+    #         for special_token in tokenizer.special_tokens_map.values():
+    #             if isinstance(special_token, list):
+    #                 for special_tok in special_token:
+    #                     output = output.replace(special_tok, "")
+    #             else:
+    #                 output = output.replace(special_token, "")
+    #         output = output.strip()
 
 
 
-            turns.append(output)
-            idxs.append(int(idx))
-            new_tokens.append(int(new_token))
-            wall_time.append(total_time)
-            messages.append({
-                "role": "assistant",
-                "content": output
-            })
-    print('Warmup done')
+    #         turns.append(output)
+    #         idxs.append(int(idx))
+    #         new_tokens.append(int(new_token))
+    #         wall_time.append(total_time)
+    #         messages.append({
+    #             "role": "assistant",
+    #             "content": output
+    #         })
+    # print('Warmup done')
 
     # questions=questions[6:]
-    for question in tqdm(questions):
+    for question in tqdm(questions[:1]):
 
         choices = []
         for i in range(num_choices):
@@ -230,6 +231,10 @@ def get_model_answers(
                     add_generation_prompt=True,
                 )
                 input_ids = tokenizer([prompt], add_special_tokens=False, ).input_ids
+                print("Calling eagenerate...")
+                print(f"Processing question {question['question_id']}, choice: {i}, turn: {j}. Input ids: length={len(input_ids[0])}")
+                print(f"Input ids: {input_ids}")
+                print(f"Prompt: {prompt}")
 
                 # try:
                 torch.cuda.synchronize()
@@ -249,6 +254,9 @@ def get_model_answers(
                     tokenizer.eos_token_id,
                     tokenizer.convert_tokens_to_ids("<|eot_id|>")
                 ]
+                print("...Done with eagenerate")
+                print(f"Obtained output ids: length={len(output_ids)}, output ids: {output_ids}")
+                print(f"New token: {new_token}, idx: {idx}")
 
                 if stop_token_ids:
                     stop_token_ids_index = [
@@ -273,6 +281,7 @@ def get_model_answers(
                     else:
                         output = output.replace(special_token, "")
                 output = output.strip()
+                print(f"Response: {output}")
 
                 turns.append(output)
                 idxs.append(int(idx))

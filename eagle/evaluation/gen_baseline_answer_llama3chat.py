@@ -219,87 +219,87 @@ def get_model_answers(
 
     question = questions[0]
 
-    # warmup
-    for _ in range(3):
-        torch.manual_seed(0)
+    # # warmup
+    # for _ in range(3):
+    #     torch.manual_seed(0)
 
-        messages = [
-            {"role": "system",
-             "content": "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."},
-        ]
-        turns = []
-        idxs = []
-        new_tokens = []
-        wall_time = []
-        for j in range(len(question["turns"])):
-            qs = question["turns"][j]
-            messages.append({
-                "role": "user",
-                "content": qs
-            })
-            prompt = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-            input_ids = tokenizer([prompt],add_special_tokens=False,).input_ids
+    #     messages = [
+    #         {"role": "system",
+    #          "content": "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."},
+    #     ]
+    #     turns = []
+    #     idxs = []
+    #     new_tokens = []
+    #     wall_time = []
+    #     for j in range(len(question["turns"])):
+    #         qs = question["turns"][j]
+    #         messages.append({
+    #             "role": "user",
+    #             "content": qs
+    #         })
+    #         prompt = tokenizer.apply_chat_template(
+    #             messages,
+    #             tokenize=False,
+    #             add_generation_prompt=True,
+    #         )
+    #         input_ids = tokenizer([prompt],add_special_tokens=False,).input_ids
 
-            # try:
-            torch.cuda.synchronize()
-            start_time = time.time()
+    #         # try:
+    #         torch.cuda.synchronize()
+    #         start_time = time.time()
 
-            output_ids, new_token, idx = model.naivegenerate(
-                torch.as_tensor(input_ids).cuda(),
-                temperature=temperature,
-                log=True,
-                is_llama3=True,
-            )
-            torch.cuda.synchronize()
-            total_time = time.time() - start_time
-            output_ids = output_ids[0][len(input_ids[0]):]
-            # be consistent with the template's stop_token_ids
-            stop_token_ids = [
-                tokenizer.eos_token_id,
-                tokenizer.convert_tokens_to_ids("<|eot_id|>")
-            ]
+    #         output_ids, new_token, idx = model.naivegenerate(
+    #             torch.as_tensor(input_ids).cuda(),
+    #             temperature=temperature,
+    #             log=True,
+    #             is_llama3=True,
+    #         )
+    #         torch.cuda.synchronize()
+    #         total_time = time.time() - start_time
+    #         output_ids = output_ids[0][len(input_ids[0]):]
+    #         # be consistent with the template's stop_token_ids
+    #         stop_token_ids = [
+    #             tokenizer.eos_token_id,
+    #             tokenizer.convert_tokens_to_ids("<|eot_id|>")
+    #         ]
 
-            if stop_token_ids:
-                stop_token_ids_index = [
-                    i
-                    for i, id in enumerate(output_ids)
-                    if id in stop_token_ids
-                ]
-                if len(stop_token_ids_index) > 0:
-                    output_ids = output_ids[: stop_token_ids_index[0]]
+    #         if stop_token_ids:
+    #             stop_token_ids_index = [
+    #                 i
+    #                 for i, id in enumerate(output_ids)
+    #                 if id in stop_token_ids
+    #             ]
+    #             if len(stop_token_ids_index) > 0:
+    #                 output_ids = output_ids[: stop_token_ids_index[0]]
 
-            output = tokenizer.decode(
-                output_ids,
-                spaces_between_special_tokens=False,
-            )
-            # stop_str = "</s>"
-            # if stop_str and output.find(stop_str) > 0:
-            #     output = output[: output.find(stop_str)]
-            for special_token in tokenizer.special_tokens_map.values():
-                if isinstance(special_token, list):
-                    for special_tok in special_token:
-                        output = output.replace(special_tok, "")
-                else:
-                    output = output.replace(special_token, "")
-            output = output.strip()
+    #         output = tokenizer.decode(
+    #             output_ids,
+    #             spaces_between_special_tokens=False,
+    #         )
+    #         # stop_str = "</s>"
+    #         # if stop_str and output.find(stop_str) > 0:
+    #         #     output = output[: output.find(stop_str)]
+    #         for special_token in tokenizer.special_tokens_map.values():
+    #             if isinstance(special_token, list):
+    #                 for special_tok in special_token:
+    #                     output = output.replace(special_tok, "")
+    #             else:
+    #                 output = output.replace(special_token, "")
+    #         output = output.strip()
 
 
 
-            turns.append(output)
-            idxs.append(int(idx))
-            new_tokens.append(int(new_token))
-            wall_time.append(total_time)
-            messages.append({
-                "role": "assistant",
-                "content": output
-            })
-    print('Warmup done')
+    #         turns.append(output)
+    #         idxs.append(int(idx))
+    #         new_tokens.append(int(new_token))
+    #         wall_time.append(total_time)
+    #         messages.append({
+    #             "role": "assistant",
+    #             "content": output
+    #         })
+    # print('Warmup done')
 
-    # questions=questions[6:]
+    questions=questions[:1]
     for question in tqdm(questions):
 
         choices = []
