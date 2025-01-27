@@ -111,7 +111,7 @@ def run_eval(
         torch.cuda.synchronize()
         start_time = time.time()
 
-        output_ids, new_tokens, num_decoding_steps = model.eagenerate(
+        output_ids, new_tokens, num_decoding_steps, _, _, _ = model.eagenerate(
             torch.as_tensor(input_ids).cuda(),
             temperature=0.0,
             log=True,
@@ -180,7 +180,7 @@ def run_eval(
             # try:
             torch.cuda.synchronize()
             start_time = time.time()
-            output_ids, num_new_tokens, decoding_steps = model.eagenerate(
+            output_ids, num_new_tokens, decoding_steps, speculated_tokens_per_step, accepted_tokens_per_step, generated_tokens_per_step = model.eagenerate(
                 torch.as_tensor(input_ids).cuda(),
                 temperature=0.0,
                 log=True,
@@ -192,7 +192,12 @@ def run_eval(
             output_ids = output_ids[0][len(input_ids[0]):]
             output = tokenizer.decode(output_ids)
 
-            print((int(num_new_tokens), len(output_ids), entry.response_length))
+            print(f"Speedup: {len(output_ids) / decoding_steps:.2f}x")
+            # print average speculation length, acceptance rate, and generation rate
+            avg_accepted_tokens = sum(accepted_tokens_per_step) / len(accepted_tokens_per_step)
+            avg_generated_tokens = sum(generated_tokens_per_step) / len(generated_tokens_per_step)
+            avg_speculated_tokens = sum(speculated_tokens_per_step) / len(speculated_tokens_per_step)
+            print(f"Accepted tokens/speculated: {avg_accepted_tokens}/{avg_speculated_tokens}. Acceptance rate: {avg_accepted_tokens/avg_speculated_tokens:.2f}")
 
             new_entries.append(TraceEntryEA(
                 prompt=entry.prompt,
@@ -202,7 +207,10 @@ def run_eval(
                 response_length=entry.response_length,
                 ea_response_length=len(output_ids),
                 num_decoding_steps=decoding_steps,
-                decoding_time=total_time
+                decoding_time=total_time,
+                speculated_tokens_per_step=speculated_tokens_per_step,
+                accepted_tokens_per_step=accepted_tokens_per_step,
+                generated_tokens_per_step=generated_tokens_per_step,
             ))
 
         partition.eval_entries = new_entries

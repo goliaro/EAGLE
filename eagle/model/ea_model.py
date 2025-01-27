@@ -249,6 +249,9 @@ class EaModel(nn.Module):
             #with Timer("all"):
             self.base_model.model.tree_mask = tree_mask
 
+            num_speculated_tokens = len(draft_tokens.squeeze())
+            assert num_speculated_tokens == len(tree_position_ids.squeeze())
+
             draft_tokens=draft_tokens.to(input_ids.device)
             #with Timer("tree_decoding"):
             logits, hidden_state_new, outputs = tree_decoding(
@@ -266,6 +269,14 @@ class EaModel(nn.Module):
             best_candidate, accept_length, sample_p = evaluate_posterior(
                 logits, candidates, logits_processor
             )
+            
+            
+            num_accepted_tokens = accept_length.item()
+            num_generated_tokens = num_accepted_tokens + 1 # bonus token
+            speculated_tokens_per_step.append(num_speculated_tokens)
+            accepted_tokens_per_step.append(num_accepted_tokens)
+            generated_tokens_per_step.append(num_generated_tokens)
+
             # print(accept_length)
             #with Timer("update_inference_inputs"):
             input_ids, draft_tokens, retrieve_indices,tree_mask,tree_position_ids, new_token, hidden_state, sample_token = update_inference_inputs(
@@ -296,7 +307,7 @@ class EaModel(nn.Module):
         if not log:
             return input_ids
         else:
-            return input_ids, new_token, idx
+            return input_ids, new_token, idx, speculated_tokens_per_step, accepted_tokens_per_step, generated_tokens_per_step
 
 
     @torch.no_grad()
