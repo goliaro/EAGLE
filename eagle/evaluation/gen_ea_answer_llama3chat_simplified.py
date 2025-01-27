@@ -24,7 +24,7 @@ from ..model.utils import *
 
 import sys
 from dataclasses import asdict, dataclass, field
-sys.path.append('/usr/suffix-tree-decoding/simulators')
+sys.path.append('/home/jovyan/pscratch/suffix-tree-decoding/simulators')
 from suffix_decoding_simulator_v2 import (
     TraceEntry,
     TracePartition,
@@ -37,12 +37,15 @@ from suffix_decoding_simulator_v2 import (
 class TraceEntryEA:
     prompt: str
     response: str
-    ea_response: str
     prompt_length: int
     response_length: int
+    ea_response: str
     ea_response_length: int
     num_decoding_steps: int = 0
     decoding_time: float = 0.0
+    speculated_tokens_per_step: list = field(default_factory=list)
+    accepted_tokens_per_step: list = field(default_factory=list)
+    generated_tokens_per_step: list = field(default_factory=list)
 
 def save_ea_trace(trace: Trace, output_path: str):
     # Convert the Trace instance to a dictionary
@@ -63,7 +66,6 @@ def run_eval(
         partitions,
         max_requests_per_partition,
         output_file,
-        csv_output_file,
         max_spec_tokens,
         max_depth,
         top_k,
@@ -158,7 +160,7 @@ def run_eval(
         print("Processing partition:", partition.partition_name)
 
         new_entries = []
-        for eval_entry_idx, entry in tqdm(enumerate(partition.eval_entries)):
+        for eval_entry_idx, entry in tqdm(enumerate(partition.eval_entries), total=len(partition.eval_entries)):
             if eval_entry_idx >= max_requests_per_partition:
                 new_entries.append(TraceEntryEA(
                     prompt=entry.prompt,
@@ -234,7 +236,6 @@ if __name__ == "__main__":
         help="Max number of requests to run on each partition.",
     )
     parser.add_argument("--output-file", type=str, required=True, help="The output answer file.")
-    parser.add_argument("--csv-output-file", type=str, required=True, help="The metrics output file.")
     parser.add_argument(
         "--max-spec-tokens",
         type=int,
@@ -257,7 +258,7 @@ if __name__ == "__main__":
     print("Loading trace from ", args.trace_path)
     # trace = load_trace(args.trace_path)
     # print("Trace metadata:")
-    print(f"Output to {args.output_file}, with metrics in {args.csv_output_file}")
+    print(f"Writing output to {args.output_file}")
 
     run_eval(
         args.base_model_path,
@@ -266,7 +267,6 @@ if __name__ == "__main__":
         args.partitions,
         args.max_requests_per_partition,
         args.output_file,
-        args.csv_output_file,
         args.max_spec_tokens,
         args.max_depth,
         args.top_k

@@ -240,6 +240,11 @@ class EaModel(nn.Module):
         )
         new_token = 0
 
+
+        speculated_tokens_per_step= []
+        accepted_tokens_per_step= []
+        generated_tokens_per_step= []
+
         for idx in range(max_length):
             #with Timer("all"):
             self.base_model.model.tree_mask = tree_mask
