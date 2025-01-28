@@ -19,7 +19,7 @@ from .kv_cache import initialize_past_key_values
 from .cnets import Model
 from .configs import EConfig
 
-
+from suffix_decoding_simulator_v2 import *
 
 
 
@@ -34,7 +34,11 @@ class EaModel(nn.Module):
             depth,
             top_k,
             threshold,
-            ea_layer_state_dict
+            ea_layer_state_dict,
+            suffix_tree_trace_filepath,
+            suffix_tree_partition_name,
+            suffix_tree_matching_strategy,
+            suffix_tree_max_spec_factor,
     ):
 
         super().__init__()
@@ -69,6 +73,19 @@ class EaModel(nn.Module):
         self.ea_layer.to(self.base_model.dtype).to(device)
         self.ea_layer.init_tree()
 
+        # Suffix Tree initialization
+        self.suffix_tree = None
+        self.suffix_tree_max_depth = 64
+        self.suffix_tree_trace_filepath = suffix_tree_trace_filepath
+        self.suffix_tree_partition_name = suffix_tree_partition_name
+        self.suffix_tree_matching_strategy = suffix_tree_matching_strategy
+        self.suffix_tree_max_spec_factor = suffix_tree_max_spec_factor
+        assert((self.suffix_tree_trace_filepath is None) == (self.suffix_tree_partition_name is None))
+        if not self.suffix_tree_trace_filepath is None:
+            self.init_suffix_tree(self.suffix_tree_trace_filepath, self.suffix_tree_partition_name)
+        
+
+
     def get_tokenizer(self):
         """Get the tokenizer of the base model.
 
@@ -76,6 +93,31 @@ class EaModel(nn.Module):
             Tokenizer: The tokenizer of the base model.
         """
         return self.tokenizer
+    
+    def init_suffix_tree(self, trace_filepath: str, partition_name: str):
+        if self.suffix_tree is not None:
+            raise ValueError("Suffix tree is already initialized.")
+        if self.suffix_tree_max_depth <= 0:
+            raise ValueError("Suffix tree max depth must be greater than 0.")
+        if not os.path.exists(trace_filepath):
+            raise ValueError(f"Trace file {trace_filepath} does not exist.")
+        trace = load_trace(trace_filepath)
+        training_data = None
+        for partition in trace.partitions:
+            if partition.partition_name == partition_name:
+                training_data = [self.tokenizer.encode(training_entry.response, add_special_tokens=False) for training_entry in partition.training_entries]
+                break
+        if training_data is None:
+            raise ValueError(f"Partition {partition_name} not found in trace.")
+        
+        print(f"Constructing suffix tree for partition {partition_name} with {len(training_data)} training entries.")
+        start_time = time.time()
+        self.suffix_tree = SuffixTree(
+            prompt_response_pairs=training_data,
+            max_depth=self.suffix_tree_max_depth,
+        )
+        end_time = time.time()
+        print(f"Suffix tree construction completed in {end_time - start_time:.2f} seconds.")
 
     @classmethod
     def from_pretrained(
@@ -87,6 +129,10 @@ class EaModel(nn.Module):
             depth=5,
             top_k=10,
             threshold=1.0,
+            suffix_tree_trace_filepath=None,
+            suffix_tree_partition_name=None,
+            suffix_tree_matching_strategy=MatchingStrategy.DYNAMIC_TOKEN_TREE,
+            suffix_tree_max_spec_factor=4.0,
             **kwargs,
     ):
         #assert Type=="LLaMA" or "Mixtral"
@@ -128,7 +174,11 @@ class EaModel(nn.Module):
             depth,
             top_k,
             threshold,
-            ea_layer_state_dict
+            ea_layer_state_dict,
+            suffix_tree_trace_filepath,
+            suffix_tree_partition_name,
+            suffix_tree_matching_strategy,
+            suffix_tree_max_spec_factor,
         )
 
 
@@ -154,8 +204,6 @@ class EaModel(nn.Module):
                 times.append((end_time - start_time) / x[i])
             total_token=cans[times.index(min(times))]
             model.ea_layer.total_tokens=total_token-1
-
-
 
 
         return model
@@ -185,6 +233,223 @@ class EaModel(nn.Module):
             return outputs, orig, hidden_states
         else:
             return outputs, hidden_states
+
+    def populate_best_suffix_tree_candidates(self, prompt_tree, input_ids):
+        max_prefix_length = min(len(input_ids), self.suffix_tree_max_depth)
+        candidate = ([], [])
+        prefix_length = 0
+        best_score = 0
+        for length in range(1, max_prefix_length + 1):
+            token_ids, parents, score = prompt_tree.find_best_path_or_tree(
+                input_ids[len(input_ids) - length :],
+                self.suffix_tree_matching_strategy,
+                self.suffix_tree_max_spec_factor,
+                self.ea_layer.total_tokens-1,
+            )
+            if score > best_score:
+                candidate = (token_ids, parents)
+                prefix_length = length
+                best_score = score
+        for length in range(1, max_prefix_length + 1):
+            token_ids, parents, score = self.suffix_tree.find_best_path_or_tree(
+                input_ids[len(input_ids) - length :],
+                self.suffix_tree_matching_strategy,
+                self.suffix_tree_max_spec_factor,
+                self.ea_layer.total_tokens-1,
+            )
+            if score > best_score:
+                candidate = (token_ids, parents)
+                prefix_length = length
+                best_score = score
+        return candidate[0], candidate[1], prefix_length
+    
+    def generate_suffix_decoding_mask_and_positions(self, draft_token_ids, draft_token_parents, input_ids):
+        assert(len(draft_token_ids) == len(draft_token_parents))
+        assert(input_ids is not None)
+        assert(input_ids.shape[0] == 1)
+        assert(input_ids.shape[1] >= 1)
+        
+        draft_tokens, tree_mask, tree_position_ids = input_ids[:,-1:], None, None
+        if len(draft_token_parents) > 0:
+            tree_mask = torch.zeros((self.ea_layer.total_tokens, self.ea_layer.total_tokens))
+            tree_position_ids = torch.zeros(len(draft_token_parents), dtype=torch.long)
+            for i, parent in enumerate(draft_token_parents):
+                assert parent < i
+                idx_to_copy_from = 0 if i == 0 else parent + 1
+                assert idx_to_copy_from < i+1
+                # Set causal relationship to all tokens with causal relationship to the parent
+                tree_mask[i+1, :] = tree_mask[idx_to_copy_from, :]
+                # Set causal relationship to self
+                tree_mask[i+1, i+1] = 1
+                # set position ids: position of current token = position of the parent + 1
+                tree_position_ids[i] = tree_position_ids[parent] + 1
+            tree_position_ids = tree_position_ids + input_ids.shape[1]-1
+        return draft_tokens, tree_mask, tree_position_ids
+
+    def verify_and_commit(self, draft_tokens, draft_token_parents, logits, past_key_values, past_key_values_data, current_length_data):
+        accepted_length = 0
+        # Root is always accepted
+        accepted_tokens = draft_tokens[:,0:1]
+        # remove root from draft tokens
+        draft_tokens = draft_tokens[:,1:]
+        correct_tokens = torch.argmax(logits, dim=-1)
+        print("draft tokens.shape: ", draft_tokens.shape)
+        print("draft tokens: ", draft_tokens)
+        print("correct tokens.shape: ", correct_tokens.shape)
+        print("correct tokens: ", correct_tokens)
+        return accepted_tokens, accepted_length       
+
+    @torch.no_grad()
+    def suffix_decoding_generate(
+            self,
+            input_ids,
+            temperature=0.0,
+            top_p=0.0,
+            top_k=0.0,
+            max_new_tokens=3500,
+            max_length=8200,
+            log=False,
+            is_llama3=False,
+
+    ):
+        if is_llama3:
+            stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
+        max_length=max_length-self.ea_layer.total_tokens-10
+
+        assert temperature == 0.0, "Suffix decoding does not support temperature"
+        assert top_p == 0.0, "Suffix decoding does not support top_p"
+        assert top_k == 0.0, "Suffix decoding does not support top_k"
+
+        padding=(torch.zeros(1,1,dtype=torch.long)-1).to(input_ids.device)
+        input_ids = input_ids.clone()
+        self.ea_layer.reset_kv()
+
+        # Initialize prompt tree
+        prompt_tree = SuffixTree([input_ids.squeeze().tolist()], max_depth=self.suffix_tree_max_depth)
+
+
+        # Initialize the past key and value states
+        if hasattr(self, "past_key_values"):
+            past_key_values = self.past_key_values
+            past_key_values_data = self.past_key_values_data
+            current_length_data = self.current_length_data
+            # Reset the past key and value states
+            current_length_data.zero_()
+        else:
+            (
+                past_key_values,
+                past_key_values_data,
+                current_length_data,
+            ) = initialize_past_key_values(self.base_model)
+            self.past_key_values = past_key_values
+            self.past_key_values_data = past_key_values_data
+            self.current_length_data = current_length_data
+            
+
+        input_len = input_ids.shape[1]
+        reset_tree_mode(self)
+        # Prefilling
+        outputs, logits, hidden_states = self(
+            input_ids, 
+            past_key_values=past_key_values, 
+            output_orig=True,
+        )
+        bonus_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+        # Append to input_ids
+        input_ids = torch.cat([input_ids, bonus_token.to(input_ids.device)], dim=-1)
+
+        new_token = 1
+
+
+        # speculated_tokens_per_step= []
+        # accepted_tokens_per_step= []
+        # generated_tokens_per_step= []
+        # speculation_times = [spec_time]
+
+        print("Prefilled ", input_len, "tokens")
+        print("Input ids shape: ", input_ids.shape)
+        print("Input ids: ", input_ids)
+        print("Bonus token shape: ", bonus_token.shape)
+        print("Bonus token: ", bonus_token)
+       
+        # print("retrieve_indices.shape", retrieve_indices.shape)
+        # print("retrieve_indices: ", retrieve_indices)
+        
+        print("logits.shape: ", logits.shape)
+        print("logits", logits)
+        # print("past_key_values_data.shape: ", past_key_values_data.shape)
+        # print("len(past_key_values_data)", len(past_key_values_data))
+        # print("past_key_values_data: ", past_key_values_data)
+        # print("current_length_data.shape: ", current_length_data.shape)
+        # print("current_length_data: ", current_length_data)
+
+
+        for idx in range(max_length):
+            print("\nStep ", idx)
+
+            # generate predictions
+            draft_tokens_ids, draft_token_parents, prefix_length = self.populate_best_suffix_tree_candidates(prompt_tree, input_ids)
+            num_speculated_tokens = len(draft_tokens_ids)
+
+            # print("Draft tokens shape: ", draft_tokens.shape)
+            print("Draft token ids: ", draft_tokens_ids)
+            print("Draft tokens parents: ", draft_token_parents)
+            print("Prefix length: ", prefix_length)
+            # print("tree_mask.shape: ", tree_mask.shape)
+            # print("tree_mask: ", tree_mask)
+
+            # Build tree mask, position ids
+            draft_tokens, tree_mask, tree_position_ids = self.generate_suffix_decoding_mask_and_positions(draft_tokens_ids, draft_token_parents, input_ids)
+            print("Draft tokens: ", draft_tokens)
+            print("Tree mask: ", tree_mask)
+            print("Tree position ids: ", tree_position_ids)
+            self.base_model.model.tree_mask = tree_mask
+
+            assert (tree_mask is None) == (tree_position_ids is None)
+            if tree_mask is not None:
+                assert num_speculated_tokens == len(tree_position_ids.squeeze())
+
+            
+            # Verification LLM
+            outputs, logits, hidden_states = self(
+                draft_tokens, 
+                past_key_values=past_key_values, 
+                position_ids=tree_position_ids, 
+                output_orig=True,
+            )
+            # Figure out which tokens were accepted, and update the kv cache. Root is always accepted
+            accepted_tokens, accepted_length = self.verify_and_commit(draft_tokens, draft_token_parents, logits, past_key_values, past_key_values_data, current_length_data)
+            print("Accepted tokens.shape: ", accepted_tokens.shape)
+            print("Accepted tokens: ", accepted_tokens)
+            # Append tokens to the input_ids
+            input_ids = torch.cat([input_ids, accepted_tokens.to(input_ids.device)], dim=-1)
+            # Update KV cache to store committed tokens (accepted tokens + bonus)
+            
+            print("new input_ids: ", input_ids)
+            
+            
+            # num_accepted_tokens = accept_length.item()
+            # num_generated_tokens = num_accepted_tokens + 1 # bonus token
+            # speculated_tokens_per_step.append(num_speculated_tokens)
+            # accepted_tokens_per_step.append(num_accepted_tokens)
+            # generated_tokens_per_step.append(num_generated_tokens)
+            # speculation_times.append(spec_time)
+
+            if is_llama3:
+                if stop_token_id in input_ids[0, input_len:].tolist():
+                    break
+
+            if self.tokenizer.eos_token_id in input_ids[0, input_len:].tolist():
+                break
+            if new_token > max_new_tokens:
+                break
+            if input_ids.shape[1] > max_length:
+                break
+            assert False
+        if not log:
+            return input_ids
+        else:
+            return input_ids, new_token, idx, speculated_tokens_per_step, accepted_tokens_per_step, generated_tokens_per_step, speculation_times
 
     @torch.no_grad()
     def eagenerate(
@@ -235,9 +500,11 @@ class EaModel(nn.Module):
 
         input_len = input_ids.shape[1]
         reset_tree_mode(self)
+        print("Input ids BEFORE entering initialize_tree: ", input_ids)
         draft_tokens, retrieve_indices,tree_mask,tree_position_ids, logits, hidden_state, sample_token, spec_time = initialize_tree(
             input_ids, self, past_key_values, logits_processor
         )
+        print("Input ids AFTER entering initialize_tree: ", input_ids)
         new_token = 0
 
 
@@ -246,15 +513,35 @@ class EaModel(nn.Module):
         generated_tokens_per_step= []
         speculation_times = [spec_time]
 
+        print("Prefilled ", input_len, "tokens")
+        print("Input ids shape: ", input_ids.shape)
+        print("Input ids: ", input_ids)
+        print("Draft tokens shape: ", draft_tokens.shape)
+        print("Draft tokens: ", draft_tokens)
+        print("retrieve_indices.shape", retrieve_indices.shape)
+        print("retrieve_indices: ", retrieve_indices)
+        print("tree_mask.shape: ", tree_mask.shape)
+        print("tree_mask: ", tree_mask)
+        print("logits.shape: ", logits.shape)
+        print("logits", logits)
+        # print("past_key_values_data.shape: ", past_key_values_data.shape)
+        print("len(past_key_values_data)", len(past_key_values_data))
+        print("past_key_values_data: ", past_key_values_data)
+        print("current_length_data.shape: ", current_length_data.shape)
+        print("current_length_data: ", current_length_data)
+
+
         for idx in range(max_length):
             #with Timer("all"):
             self.base_model.model.tree_mask = tree_mask
+            print("Step ", idx)
 
             num_speculated_tokens = len(draft_tokens.squeeze())
             assert num_speculated_tokens == len(tree_position_ids.squeeze())
 
             draft_tokens=draft_tokens.to(input_ids.device)
             #with Timer("tree_decoding"):
+            print("verification...")
             logits, hidden_state_new, outputs = tree_decoding(
                 self,
                 draft_tokens,
@@ -263,13 +550,26 @@ class EaModel(nn.Module):
                 input_ids,
                 retrieve_indices,
             )
+
+
             #retrieve_indices=tree_buffers["retrieve_indices"]
             #logits = logits[0, retrieve_indices]
             draft_tokens=torch.cat((draft_tokens,padding),dim=1)
             candidates=draft_tokens[0,retrieve_indices]
+            
+            print("draft tokens after applying padding: ", draft_tokens.shape)
+            print(draft_tokens)
+            print("candidates after applying retrieve_indices: ", candidates.shape)
+            print(candidates)
+
             best_candidate, accept_length, sample_p = evaluate_posterior(
                 logits, candidates, logits_processor
             )
+
+            print("best candidate.shape: ", best_candidate.shape)
+            print("best candidate: ", best_candidate)
+            print("accept length.shape: ", accept_length.shape)
+            print("accept length: ", accept_length)
             
             
             num_accepted_tokens = accept_length.item()
@@ -306,6 +606,7 @@ class EaModel(nn.Module):
                 break
             if input_ids.shape[1] > max_length:
                 break
+            assert False
         if not log:
             return input_ids
         else:

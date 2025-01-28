@@ -230,6 +230,7 @@ def initialize_tree0(input_ids, model, past_key_values, logits_processor):
     return draft_tokens, retrieve_indices,tree_mask,tree_position_ids, logits, hidden_state, sample_token
 
 def initialize_tree(input_ids, model, past_key_values, logits_processor):
+    print("initialize_tree...")
     outputs, orig, hidden_states = model(
         input_ids, past_key_values=past_key_values, output_orig=True
     )
@@ -240,6 +241,13 @@ def initialize_tree(input_ids, model, past_key_values, logits_processor):
         probabilities = torch.nn.functional.softmax(logits, dim=1)
         token = torch.multinomial(probabilities, 1)
     else:
+        print("Getting first token...")
+        print("orig.shape:", orig.shape)
+        print("orig:", orig)
+        print("orig[:, -1].shape:", orig[:, -1].shape)
+        print("orig[:, -1]:", orig[:, -1])
+        print("torch.argmax(orig[:, -1]).shape:", torch.argmax(orig[:, -1]).shape)
+        print("torch.argmax(orig[:, -1]):", torch.argmax(orig[:, -1]))
         token = torch.argmax(orig[:, -1])
         token = token[None, None]
     input_ids = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
@@ -309,6 +317,7 @@ def tree_decoding(
         retrieve_indices,
 ):
     position_ids = tree_position_ids + input_ids.shape[1]
+    print("position ids after adding input_ids.shape[1]:", position_ids)
 
     outputs, tree_logits, hidden_state = model(
         tree_candidates,
@@ -316,9 +325,17 @@ def tree_decoding(
         past_key_values=past_key_values,
         position_ids=position_ids,
     )
+    print("tree_logits after passing the tree_candidates:")
+    # print("outputs.shape:", outputs.shape)
+    # print("outputs:", outputs)
+    print("tree_logits.shape:", tree_logits.shape)
+    print("tree_logits:", tree_logits)
 
 
     logits = tree_logits[0, retrieve_indices]
+    print("logits after applying tree_logits[0, retrieve_indices]:")
+    print("logits.shape:", logits.shape)
+    print("logits:", logits)
     return logits, hidden_state, outputs
 
 
@@ -350,9 +367,16 @@ def evaluate_posterior(
     # Greedy decoding based on temperature value
     if logits_processor is None:
         # Find the tokens that match the maximum logits for each position in the sequence
+        print("performing greedy decoding...")
+        print("torch.argmax(logits[:, :-1], dim=-1).shape:", torch.argmax(logits[:, :-1], dim=-1).shape)
+        print("torch.argmax(logits[:, :-1], dim=-1):", torch.argmax(logits[:, :-1], dim=-1))
+        print("candidates[:, 1:].shape:", candidates[:, 1:].shape)
+        print("candidates[:, 1:]:", candidates[:, 1:])
         posterior_mask = (
                 candidates[:, 1:].to(logits.device) == torch.argmax(logits[:, :-1], dim=-1)
         ).int()
+        print("posterior_mask.shape:", posterior_mask.shape)
+        print("posterior_mask:", posterior_mask)
         candidates_accept_length = (torch.cumprod(posterior_mask, dim=1)).sum(dim=1)
         accept_length = candidates_accept_length.max()
         # Choose the best candidate

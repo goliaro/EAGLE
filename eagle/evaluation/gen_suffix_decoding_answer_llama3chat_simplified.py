@@ -18,19 +18,22 @@ import shortuuid
 from fastchat.llm_judge.common import load_questions
 from tqdm import tqdm
 
+import sys
+from dataclasses import asdict, dataclass, field
+sys.path.append('/home/jovyan/pscratch/suffix-tree-decoding/simulators')
+
 from ..model.ea_model import EaModel
 from ..model.kv_cache import initialize_past_key_values
 from ..model.utils import *
 
-import sys
-from dataclasses import asdict, dataclass, field
-sys.path.append('/home/jovyan/pscratch/suffix-tree-decoding/simulators')
+
 from suffix_decoding_simulator_v2 import (
     TraceEntry,
     TracePartition,
     TraceMetadata,
     Trace,
-    load_trace
+    load_trace,
+    MatchingStrategy,
 )
 
 @dataclass
@@ -76,6 +79,7 @@ def run_eval(
     # Filter partitions from the trace
     partition_names = partitions.split(",")
     trace.partitions = [trace.partitions[i] for i in range(len(trace.partitions)) if trace.partitions[i].partition_name in partition_names]
+    assert(len(partition_names)==1)
 
     model = EaModel.from_pretrained(
         base_model_path = base_model_path,
@@ -85,7 +89,11 @@ def run_eval(
         top_k = top_k,
         torch_dtype = torch.float16,
         low_cpu_mem_usage = True,
-        device_map = "auto"
+        device_map = "auto",
+        suffix_tree_trace_filepath = trace_path,
+        suffix_tree_partition_name = partition_names[0],
+        suffix_tree_matching_strategy=MatchingStrategy.DYNAMIC_TOKEN_TREE,
+        suffix_tree_max_spec_factor=4.0,
     )
 
     tokenizer = model.get_tokenizer()
@@ -102,7 +110,7 @@ def run_eval(
     print("Performing warmup with entry:", warmup_entry)
 
     # warmup
-    for run_idx in range(3):
+    for run_idx in range(0):
         torch.manual_seed(0)
         
         input_ids = tokenizer([warmup_entry.prompt], add_special_tokens=False,).input_ids
@@ -180,7 +188,7 @@ def run_eval(
             # try:
             torch.cuda.synchronize()
             start_time = time.time()
-            output_ids, num_new_tokens, decoding_steps, speculated_tokens_per_step, accepted_tokens_per_step, generated_tokens_per_step = model.eagenerate(
+            output_ids, num_new_tokens, decoding_steps, speculated_tokens_per_step, accepted_tokens_per_step, generated_tokens_per_step = model.suffix_decoding_generate(
                 torch.as_tensor(input_ids).cuda(),
                 temperature=0.0,
                 log=True,
